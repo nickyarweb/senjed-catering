@@ -152,14 +152,14 @@ const lineTotal = (l) => (l.size === "s" ? findDish(l.id).s : findDish(l.id).l) 
 const orderTotal = () => order.reduce((t, l) => t + lineTotal(l), 0);
 const orderCount = () => order.reduce((t, l) => t + l.qty, 0);
 
-function addItem(id, size) {
+function addItem(id, size, qty = 1, silent = false) {
   const k = lineKey(id, size);
   const existing = order.find((l) => lineKey(l.id, l.size) === k);
-  if (existing) existing.qty++;
-  else order.push({ id, size, qty: 1 });
+  if (existing) existing.qty += qty;
+  else order.push({ id, size, qty });
   save();
   updateOrderUI();
-  toast(`Added ${size === "s" ? "small" : "large"} tray of ${findDish(id).name}`);
+  if (!silent) toast(`Added ${size === "s" ? "small" : "large"} tray of ${findDish(id).name}`);
 }
 
 function changeQty(key, delta) {
@@ -281,6 +281,133 @@ toggle.addEventListener("click", () => {
 nav.addEventListener("click", (e) => {
   if (e.target.tagName === "A") { nav.classList.remove("open"); toggle.setAttribute("aria-expanded", "false"); }
 });
+
+/* ---------- Party planner ---------- */
+// About how many people one tray feeds (middle of the 8–10 and 15–20 ranges).
+const SMALL_SERVES = 9;
+const LARGE_SERVES = 17;
+
+const COURSES = [
+  { id: "rice",    label: "Rice",            cats: ["rice"],                  pick: "kabuli-pulao-lamb" },
+  { id: "main",    label: "Main dish",       cats: ["stews", "kebabs"],       pick: "chicken-kebab" },
+  { id: "side",    label: "Starter or side", cats: ["bites", "veg", "soups"], pick: "bolani" },
+  { id: "dessert", label: "Dessert",         cats: ["desserts"],              pick: "fereni" },
+];
+const planState = Object.fromEntries(COURSES.map((c) => [c.id, { on: true, dish: c.pick }]));
+
+// Large trays for the bulk of the guests, then the cheaper way to cover whoever is left.
+function traysFor(dish, guests) {
+  if (dish.l == null) return { large: 0, small: Math.ceil(guests / SMALL_SERVES) };
+  let large = Math.floor(guests / LARGE_SERVES);
+  let small = 0;
+  const left = guests - large * LARGE_SERVES;
+  if (left > 0) {
+    const smallNeeded = Math.ceil(left / SMALL_SERVES); // 1 or 2
+    if (smallNeeded === 1 || smallNeeded * dish.s < dish.l) small = smallNeeded;
+    else large += 1;
+  }
+  return { large, small };
+}
+const trayCost = (dish, t) => t.large * (dish.l || 0) + t.small * dish.s;
+const trayText = (t) =>
+  [t.large ? `${t.large} large` : "", t.small ? `${t.small} small` : ""].filter(Boolean).join(" + ") +
+  ((t.large + t.small) === 1 ? " tray" : " trays");
+
+const guestNum = $("#guestNum");
+const guestRange = $("#guestRange");
+const coursesEl = $("#courses");
+
+function getGuests() {
+  const n = parseInt(guestNum.value, 10);
+  return Math.min(500, Math.max(5, isNaN(n) ? 30 : n));
+}
+
+function renderCourses() {
+  coursesEl.innerHTML = COURSES.map((c) => {
+    const options = MENU.filter((d) => c.cats.includes(d.cat))
+      .map((d) => `<option value="${d.id}"${d.id === planState[c.id].dish ? " selected" : ""}>${d.name}</option>`)
+      .join("");
+    return `
+      <div class="course" data-course="${c.id}">
+        <input type="checkbox" checked aria-label="Include ${c.label.toLowerCase()}" data-toggle="${c.id}">
+        <img src="images/${planState[c.id].dish}.jpg" alt="">
+        <div class="c-main">
+          <span class="c-label">${c.label}</span>
+          <select data-course="${c.id}" aria-label="Choose ${c.label.toLowerCase()}">${options}</select>
+        </div>
+        <span class="c-trays"></span>
+        <span class="c-sub"></span>
+      </div>`;
+  }).join("");
+}
+
+function updatePlan() {
+  const guests = getGuests();
+  let total = 0;
+  COURSES.forEach((c) => {
+    const row = coursesEl.querySelector(`.course[data-course="${c.id}"]`);
+    const dish = findDish(planState[c.id].dish);
+    const t = traysFor(dish, guests);
+    const cost = trayCost(dish, t);
+    row.classList.toggle("off", !planState[c.id].on);
+    row.querySelector("img").src = `images/${dish.id}.jpg`;
+    row.querySelector(".c-trays").textContent = trayText(t);
+    row.querySelector(".c-sub").textContent = money(cost);
+    if (planState[c.id].on) total += cost;
+  });
+  $("#planTotal").textContent = money(total);
+  $("#planPer").textContent = total ? `about ${money(Math.round((total / guests) * 100) / 100)} per guest` : "";
+  document.querySelectorAll(".quick-guests button").forEach((b) => b.classList.toggle("on", Number(b.dataset.g) === guests));
+}
+
+function setGuests(n) {
+  guestNum.value = n;
+  guestRange.value = Math.min(250, n);
+  updatePlan();
+}
+
+guestNum.addEventListener("input", () => { guestRange.value = Math.min(250, getGuests()); updatePlan(); });
+guestNum.addEventListener("change", () => { guestNum.value = getGuests(); updatePlan(); });
+guestRange.addEventListener("input", () => setGuests(Number(guestRange.value)));
+document.querySelectorAll(".step-btn").forEach((b) =>
+  b.addEventListener("click", () => setGuests(Math.min(500, Math.max(5, getGuests() + Number(b.dataset.step)))))
+);
+document.querySelectorAll(".quick-guests button").forEach((b) => b.addEventListener("click", () => setGuests(Number(b.dataset.g))));
+
+coursesEl.addEventListener("change", (e) => {
+  if (e.target.matches("select")) planState[e.target.dataset.course].dish = e.target.value;
+  if (e.target.matches("input[type=checkbox]")) planState[e.target.dataset.toggle].on = e.target.checked;
+  updatePlan();
+});
+
+$("#planAdd").addEventListener("click", () => {
+  const guests = getGuests();
+  let added = 0;
+  COURSES.forEach((c) => {
+    if (!planState[c.id].on) return;
+    const dish = findDish(planState[c.id].dish);
+    const t = traysFor(dish, guests);
+    if (t.large) addItem(dish.id, "l", t.large, true);
+    if (t.small) addItem(dish.id, "s", t.small, true);
+    added += t.large + t.small;
+  });
+  if (!added) { toast("Pick at least one course first"); return; }
+  toast(`Added ${added} trays for ${guests} guests`);
+  const n = $("#oNotes");
+  if (!n.value.includes("guests")) { n.value = (n.value ? n.value + " " : "") + `About ${guests} guests.`; updateLinks(); }
+  openDrawer();
+});
+
+// "Plan for X guests" buttons on the event cards
+document.querySelectorAll(".event-btn").forEach((b) =>
+  b.addEventListener("click", () => {
+    setGuests(Number(b.dataset.guests));
+    $("#planner").scrollIntoView({ behavior: "smooth" });
+  })
+);
+
+renderCourses();
+updatePlan();
 
 $("#year").textContent = new Date().getFullYear();
 updateOrderUI();
